@@ -114,7 +114,11 @@ class PruebasIntegracion(unittest.TestCase):
             conexion.shutdown(socket.SHUT_RDWR)
         finally:
             conexion.close()
-        self.assertIn("conexión", self.evento(sesion, "desconectado"))
+        motivo = self.evento(sesion, "desconectado")
+        # El sistema puede producir EOF o un reset TCP; su texto depende
+        # del idioma del SO. Ambos deben terminar el hilo y avisar a Tk.
+        self.assertTrue(motivo == "El servidor cerró la conexión."
+                        or motivo.startswith("Error de red:"), motivo)
         sesion.join(3)
         self.assertFalse(sesion.is_alive())
 
