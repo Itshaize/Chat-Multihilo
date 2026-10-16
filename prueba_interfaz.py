@@ -1,10 +1,12 @@
-"""Integración con sockets reales y comprobaciones del bucle Tk."""
+"""Integración con sockets reales y comprobaciones del bucle TUI."""
 import socket
 import threading
 import time
-import tkinter as tk
+import asyncio
 import unittest
 from unittest.mock import MagicMock, patch
+from textual import events
+from textual.widgets import Checkbox, Input, RichLog
 
 from interfaz_chat import InterfazChat, SesionChat
 from protocolo import CODIFICACION, MAXIMO_ALIAS, MAXIMO_MENSAJE
@@ -136,61 +138,57 @@ class PruebasIntegracion(unittest.TestCase):
                 sesion.enviar(mensaje)
 
 
-class PruebasTk(unittest.TestCase):
-    def setUp(self):
-        try:
-            self.raiz = tk.Tk()
-        except tk.TclError as error:
-            self.skipTest(f"Tk no disponible: {error}")
-        self.raiz.withdraw()
-        self.app = InterfazChat(self.raiz)
+class PruebasTUI(unittest.IsolatedAsyncioTestCase):
+    async def test_validacion_teclado_y_terminal_compacta(self):
+        app = InterfazChat()
+        async with app.run_test(size=(64, 28)) as piloto:
+            await piloto.click("#conectar")
+            self.assertIsNone(app.sesion)
+            self.assertIn("Alias obligatorio", str(app.query_one("#estado").render()))
+            await piloto.click("#alias")
+            await piloto.press("A", "n", "a", "enter")
+            self.assertEqual(app.focused.id, "ip")
+            app.query_one("#ip", Input).value = "inválida"
+            await piloto.press("enter")
+            self.assertIsNone(app.sesion)
+            self.assertIn("IPv4 válida", str(app.query_one("#estado").render()))
+            await piloto.press("f2")
+            self.assertTrue(app.query_one("#sonido", Checkbox).value)
+            self.assertTrue(app.screen.has_class("compacto"))
 
-    def tearDown(self):
-        if hasattr(self, "raiz"):
-            for identificador in self.raiz.tk.call("after", "info"):
-                self.raiz.after_cancel(identificador)
-            self.raiz.destroy()
+    async def test_eventos_hilo_principal_no_leidos_y_markup_literal(self):
+        app = InterfazChat()
+        async with app.run_test() as piloto:
+            sesion = SesionChat("127.0.0.1", "Ana")
+            app.sesion = sesion
+            principal, agregar = threading.get_ident(), app.agregar
+            def comprobar(*args):
+                self.assertEqual(threading.get_ident(), principal)
+                agregar(*args)
+            app.agregar = comprobar
+            app.on_app_blur(events.AppBlur())
+            def publicar():
+                sesion.eventos.put(("recibido", "[Bob]: [bold]Hola[/bold]\x1b"))
+                sesion.eventos.put(("enviado", "Respuesta"))
+            hilo = threading.Thread(target=publicar)
+            hilo.start()
+            hilo.join()
+            await piloto.pause(0.15)
+            self.assertEqual(app.no_leidos, 1)
+            self.assertEqual(app.sub_title, "1 sin leer")
+            historial = app.query_one("#historial", RichLog)
+            lineas = "\n".join(linea.text for linea in historial.lines)
+            self.assertIn("[bold]Hola[/bold]", lineas)
+            self.assertNotIn("\x1b", lineas)
+            self.assertIn("[Ana]: Respuesta", lineas)
+            app.on_app_focus(events.AppFocus())
+            self.assertEqual(app.no_leidos, 0)
+            sesion.eventos.put(("desconectado", "Conexión cerrada"))
+            await piloto.pause(0.15)
+            self.assertIsNone(app.sesion)
+            self.assertFalse(app.query_one("#conectar").disabled)
 
-    def test_eventos_hilo_principal_no_leidos_y_reconexion(self):
-        sesion = SesionChat("127.0.0.1", "Ana")
-        self.app.sesion = sesion
-        principal, agregar = threading.get_ident(), self.app.agregar
-        def comprobar(*args):
-            self.assertEqual(threading.get_ident(), principal)
-            agregar(*args)
-        self.app.agregar = comprobar
-        def publicar():
-            sesion.eventos.put(("recibido", "[Bob]: Hola"))
-            sesion.eventos.put(("enviado", "Respuesta"))
-        hilo = threading.Thread(target=publicar)
-        hilo.start()
-        hilo.join()
-        with patch.object(self.raiz, "focus_displayof", return_value=None):
-            limite = time.monotonic() + 1
-            while self.app.no_leidos == 0 and time.monotonic() < limite:
-                self.raiz.update()
-                time.sleep(0.01)
-        self.assertEqual(self.app.no_leidos, 1)
-        self.assertIn("(1)", self.raiz.title())
-        self.assertIn("[Ana]: Respuesta", self.app.historial.get("1.0", "end"))
-        self.app.al_enfocar()
-        self.assertEqual(self.app.no_leidos, 0)
-        sesion.eventos.put(("desconectado", "Conexión cerrada"))
-        self.app.procesar_eventos()
-        self.assertIsNone(self.app.sesion)
-        self.assertEqual(str(self.app.conectar_boton["state"]), "normal")
-
-    def test_validacion_y_cierre(self):
-        self.app.conectar()
-        self.assertIsNone(self.app.sesion)
-        self.app.alias.set("Ana")
-        self.app.ip.set("IP incorrecta")
-        self.app.conectar()
-        self.assertIsNone(self.app.sesion)
-        self.app.cerrar()
-        self.assertTrue(self.app.cerrando)
-
-    def test_cerrar_durante_conexion_no_bloquea_tk(self):
+    async def test_cerrar_durante_conexion_mantiene_bucle_activo(self):
         inicio, liberar = threading.Event(), threading.Event()
         conexion = MagicMock()
         conexion.__enter__.return_value = conexion
@@ -198,26 +196,75 @@ class PruebasTk(unittest.TestCase):
             inicio.set()
             liberar.wait(3)
         conexion.connect.side_effect = conectar_lento
-        with patch("interfaz_chat.socket.socket", return_value=conexion):
-            self.app.alias.set("Ana")
-            self.app.conectar()
-            sesion = self.app.sesion
-            try:
-                self.assertTrue(inicio.wait(1))
-                self.app.cerrar()
-                atendido = []
-                self.raiz.after(0, lambda: atendido.append(True))
-                self.raiz.update()
-                self.assertEqual(atendido, [True])
-                self.assertTrue(sesion.is_alive())
-            finally:
-                liberar.set()
-                sesion.join(3)
-            self.assertFalse(sesion.is_alive())
-            with patch.object(self.raiz, "destroy") as destruir:
-                self.app.procesar_eventos()
-                destruir.assert_called_once()
+        app = InterfazChat()
+        with patch("red_chat.crear_socket", return_value=conexion):
+            async with app.run_test() as piloto:
+                app.query_one("#alias", Input).value = "Ana"
+                app.conectar()
+                sesion = app.sesion
+                try:
+                    self.assertTrue(await asyncio.to_thread(inicio.wait, 1))
+                    await piloto.press("ctrl+q")
+                    self.assertTrue(app.cerrando)
+                    self.assertTrue(sesion.is_alive())
+                    atendido = []
+                    app.call_later(lambda: atendido.append(True))
+                    await piloto.pause(0.05)
+                    self.assertEqual(atendido, [True])
+                finally:
+                    liberar.set()
+                    await asyncio.to_thread(sesion.join, 3)
+                await piloto.pause(0.15)
+                self.assertFalse(sesion.is_alive())
             conexion.__exit__.assert_called_once()
+
+    async def test_chat_tui_servidor_real_y_reconexion(self):
+        servidor = ServidorChat()
+        with socket.socket() as oyente:
+            oyente.settimeout(3)
+            oyente.bind(("127.0.0.1", 0))
+            oyente.listen()
+            puerto = oyente.getsockname()[1]
+            app = InterfazChat()
+            sesiones, hilos = [], []
+            def crear_sesion(ip, alias):
+                sesion = SesionChat(ip, alias, puerto)
+                sesiones.append(sesion)
+                return sesion
+            with patch("interfaz_chat.SesionChat", side_effect=crear_sesion):
+                async with app.run_test(size=(100, 32)) as piloto:
+                    try:
+                        for vuelta in range(2):
+                            app.query_one("#alias", Input).value = "Ana"
+                            await piloto.click("#conectar")
+                            conexion, direccion = await asyncio.to_thread(oyente.accept)
+                            hilo = threading.Thread(target=servidor._atender_cliente,
+                                                    args=(conexion, direccion), daemon=True)
+                            hilo.start()
+                            hilos.append(hilo)
+                            await piloto.pause(0.2)
+                            self.assertTrue(app.conectado)
+                            await piloto.press("H", "o", "l", "a", "enter")
+                            await piloto.pause(0.2)
+                            self.assertEqual(app.query_one("#mensaje", Input).value, "")
+                            lineas = "\n".join(linea.text for linea in app.query_one("#historial", RichLog).lines)
+                            self.assertIn("[Ana]: Hola", lineas)
+                            # La misma ruta maneja el botón y el atajo de desconexión.
+                            if vuelta == 0:
+                                await piloto.click("#desconectar")
+                            else:
+                                app.query_one("#mensaje", Input).value = "/salir"
+                                await piloto.press("enter")
+                            await piloto.pause(0.25)
+                            self.assertIsNone(app.sesion)
+                            self.assertFalse(app.query_one("#conectar").disabled)
+                    finally:
+                        for sesion in sesiones:
+                            sesion.desconectar()
+                            await asyncio.to_thread(sesion.join, 3)
+                        for hilo in hilos:
+                            await asyncio.to_thread(hilo.join, 3)
+                            self.assertFalse(hilo.is_alive())
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-name: Pruebas Python y Tkinter
+name: Pruebas Python y TUI
 
 on:
   push:
@@ -19,12 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Instalar pantalla virtual en Linux
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
-      - name: Pruebas en Linux con Tkinter
-        if: runner.os == 'Linux'
-        run: xvfb-run -a python -m unittest discover -p 'prueba*.py' -v
-      - name: Pruebas en Windows
-        if: runner.os == 'Windows'
+      - name: Instalar dependencias
+        run: python -m pip install -r requirements.txt
+      - name: Pruebas TCP y TUI sin pantalla gráfica
         run: python -m unittest discover -p 'prueba*.py' -v
