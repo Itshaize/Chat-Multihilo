@@ -1,126 +1,91 @@
-"""Servidor de chat TCP multihilo y difusión a clientes activos."""
-import logging
+"""Servidor de chat: una conexión y un hilo por compañero."""
 import socket
 import threading
-from dataclasses import dataclass, field
-
-from protocolo import (IP_SERVIDOR, PUERTO, CODIFICACION, COMANDO_SALIR,
-                       MAXIMO_ALIAS, MAXIMO_MENSAJE, validar_alias, validar_mensaje)
-from formato import FormateadorMensajes
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-@dataclass(eq=False)
-class ClienteConectado:
-    conexion: socket.socket
-    direccion: tuple
-    alias: str
-    bloqueo_envio: threading.Lock = field(default_factory=threading.Lock)
+class ClientHandler:
+    def __init__(self, conexion, servidor):
+        self.conexion = conexion
+        self.servidor = servidor
 
-    def enviar(self, mensaje: str) -> None:
-        with self.bloqueo_envio:
-            self.conexion.sendall((mensaje + "\n").encode(CODIFICACION))
-
-
-class RegistroClientes:
-    """Registro de clientes protegido para operaciones concurrentes."""
-    def __init__(self):
-        self._clientes = set()
-        self._bloqueo = threading.Lock()
-
-    def agregar(self, cliente):
-        with self._bloqueo:
-            self._clientes.add(cliente)
-
-    def retirar(self, cliente):
-        with self._bloqueo:
-            if cliente not in self._clientes:
-                return False
-            self._clientes.remove(cliente)
-            return True
-
-    def listar(self):
-        with self._bloqueo:
-            return list(self._clientes)
-
-
-class ServidorChat:
-    def __init__(self, host=IP_SERVIDOR, puerto=PUERTO, formateador=None):
-        self._host = host
-        self._puerto = puerto
-        self._formateador = formateador or FormateadorMensajes()
-        self._registro = RegistroClientes()
-
-    def _difundir(self, mensaje, excluir=None):
-        for destinatario in self._registro.listar():
-            if destinatario is excluir:
-                continue
-            try:
-                destinatario.enviar(mensaje)
-            except OSError:
-                logging.warning("Error al enviar a %s (%s)", destinatario.alias, destinatario.direccion)
-                try:
-                    destinatario.conexion.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-
-    def _atender_cliente(self, conexion, direccion):
-        cliente = None
-        logging.info("Conexión recibida desde %s:%s", *direccion)
+    def process(self):
+        nombre = ""
+        registrado = False
         try:
-            with conexion, conexion.makefile("r", encoding=CODIFICACION) as entrada:
-                linea_alias = entrada.readline(MAXIMO_ALIAS + 2)
-                if not linea_alias.endswith("\n"):
+            with self.conexion, self.conexion.makefile("r", encoding="utf-8") as entrada:
+                # Primera línea: nombre. Después: un mensaje por línea.
+                linea = entrada.readline(82)
+                nombre = linea.strip()
+                if not linea.endswith("\n") or not nombre or len(nombre) > 80:
                     return
-                alias = linea_alias.rstrip("\r\n")
-                if not validar_alias(alias):
-                    return
-
-                cliente = ClienteConectado(conexion, direccion, alias)
-                cliente.enviar(f"[SISTEMA]: Bienvenido, {alias}. Escribe {COMANDO_SALIR} para salir.")
-                self._registro.agregar(cliente)
-                logging.info("Usuario conectado: %s (%s:%s)", alias, *direccion)
-                self._difundir(self._formateador.formatear_conexion(alias), excluir=cliente)
-
+                with self.servidor.bloqueo:
+                    self.conexion.sendall(f"Bienvenido, {nombre}.\n".encode("utf-8"))
+                    self.servidor.clientes.append(self.conexion)
+                    registrado = True
+                self.servidor.broadcast(f"--- {nombre} entró al chat ---")
                 while True:
-                    linea = entrada.readline(MAXIMO_MENSAJE + 2)
-                    if not linea:
+                    linea = entrada.readline(4002)
+                    if not linea or not linea.endswith("\n"):
                         break
-                    if not linea.endswith("\n") or len(linea.rstrip("\r\n")) > MAXIMO_MENSAJE:
-                        cliente.enviar("[SISTEMA]: Mensaje demasiado largo. Conexión cerrada.")
+                    mensaje = linea.strip()
+                    if mensaje.lower() == "/salir":
                         break
-                    contenido = linea.rstrip("\r\n")
-                    if not contenido.strip():
-                        continue
-                    if contenido.strip().lower() == COMANDO_SALIR:
-                        break
-                    if not validar_mensaje(contenido):
-                        continue
-                    mensaje = self._formateador.formatear_mensaje(alias, contenido)
-                    logging.info("%s", mensaje)
-                    self._difundir(mensaje, excluir=cliente)
-        except (OSError, UnicodeError, ValueError) as error:
-            logging.warning("Error con %s:%s: %s", *direccion, error)
+                    if mensaje and len(mensaje) <= 4000:
+                        self.servidor.broadcast(f"[{nombre}]: {mensaje}")
+        except (OSError, UnicodeError):
+            pass
         finally:
-            if cliente is not None and self._registro.retirar(cliente):
-                self._difundir(self._formateador.formatear_desconexion(cliente.alias))
-            logging.info("Conexión cerrada: %s:%s", *direccion)
+            if registrado:
+                with self.servidor.bloqueo:
+                    self.servidor.clientes.remove(self.conexion)
+                self.servidor.broadcast(f"--- {nombre} salió del chat ---")
 
-    def iniciar(self):
+
+class ThreadedSocketServer:
+    def __init__(self, host="0.0.0.0", port=8080):
+        self.host = host
+        self.port = port
+        self.clientes = []
+        self.bloqueo = threading.Lock()
+
+    def broadcast(self, mensaje):
+        # Un solo hilo envía a la vez para no mezclar los mensajes.
+        print(mensaje, flush=True)
+        with self.bloqueo:
+            for conexion in self.clientes:
+                try:
+                    conexion.sendall((mensaje + "\n").encode("utf-8"))
+                except OSError:
+                    try:
+                        conexion.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+
+    def start(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as servidor:
             servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            servidor.bind((self._host, self._puerto))
+            servidor.bind((self.host, self.port))
             servidor.listen()
-            logging.info("Servidor escuchando en %s:%s", self._host, self._puerto)
+            print(f"Chat iniciado en {self.host}:{self.port}", flush=True)
+            print("Ctrl+C para detener.", flush=True)
             try:
                 while True:
                     conexion, direccion = servidor.accept()
-                    threading.Thread(target=self._atender_cliente,
-                                     args=(conexion, direccion), daemon=True).start()
-            except KeyboardInterrupt:
-                logging.info("Servidor detenido por el usuario.")
+                    handler = ClientHandler(conexion, self)
+                    threading.Thread(target=handler.process, daemon=True).start()
+            finally:
+                with self.bloqueo:
+                    for conexion in self.clientes:
+                        try:
+                            conexion.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
 
 
 if __name__ == "__main__":
-    ServidorChat().iniciar()
+    try:
+        ThreadedSocketServer().start()
+    except KeyboardInterrupt:
+        print("\nServidor detenido.")
+    except OSError as error:
+        print(f"No se pudo iniciar el servidor: {error}")

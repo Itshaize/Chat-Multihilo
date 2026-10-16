@@ -1,34 +1,85 @@
-# Chat Multiusuario LAN (consola)
+# Chat LAN multihilo básico
 
-Práctica de Sistemas Distribuidos en Python 3. El servidor TCP gestiona múltiples participantes y difunde los mensajes a los demás clientes conectados.
+Chat real entre compañeros, sin dependencias externas. Usa Python 3 y TCP 8080.
+Se mantienen las clases SocketClient, ClientHandler y ThreadedSocketServer
+del ejemplo, adaptadas para repartir mensajes.
 
-## Requisitos
-- Python 3.10 o superior. Solo biblioteca estándar.
-- Equipos conectados a la misma LAN con acceso TCP al puerto **5000**.
+## Actualizar todos los equipos
 
-## Ejecución
-1. Descargar/clonar el repositorio.
-2. Iniciar el servidor en un equipo: \`python3 servidor_chat.py\` (Windows: \`py servidor_chat.py\`).
-3. Averiguar la IP LAN del servidor: \`hostname -I\` en Linux o \`ipconfig\` en Windows.
-4. En cada equipo cliente ejecutar \`python3 cliente.py\` (Windows: \`py cliente.py\`), introducir alias e IP LAN del servidor.
-5. Escribir mensajes; usar \`/salir\` para cerrar. Para pruebas en un solo equipo, aceptar la IP predeterminada \`127.0.0.1\`.
+Dentro de la carpeta Chat-Multihilo:
 
-**Importante:** el servidor escucha en \`0.0.0.0:5000\`, pero los clientes deben usar su IP LAN real. Verificar cortafuegos y aislamiento de clientes si la red impide conexiones.
+```bash
+git pull origin main
+```
 
-## Archivos
-- \`servidor_chat.py\`: acepta conexiones, mantiene registro seguro y hace broadcast.
-- \`cliente.py\`: recibe y envía en paralelo con \`threading\`.
-- \`protocolo.py\`: constantes, validaciones y contrato de texto UTF-8.
-- \`formato.py\`: formato de mensajes y avisos.
-- \`prueba_chat.py\`: pruebas unitarias del protocolo y formateo.
+Hay que actualizar tanto el servidor como todos los clientes: el cliente
+anterior de eco utiliza otro protocolo y no es compatible.
 
-## Protocolo
-TCP, UTF-8 y líneas delimitadas por \`\n\`. La primera línea enviada por cada cliente contiene su alias (1–20 caracteres). Las siguientes contienen mensajes (1–1000 caracteres). El servidor agrega el prefijo \`[Alias]:\` y difunde a los demás clientes. El comando \`/salir\` cierra la sesión.
+## Equipo servidor
 
-## Diseño y concurrencia
-Separación de responsabilidades (SRP): configuración y validación en \`protocolo.py\`, presentación en \`formato.py\`, conexiones y difusión en servidor. El formateador se inyecta al servidor, facilitando extenderlo o reemplazarlo (DIP/OCP). Un hilo por conexión; el registro usa \`Lock\` y cada socket tiene un bloqueo de envío para evitar mezcla de datos. El cliente usa un hilo para entrada y otro flujo para recepción.
+```bash
+python3 servidor_chat.py
+```
+
+Escucha en 0.0.0.0:8080. Deja esa terminal abierta.
+Consulta la IP con hostname -I (Ubuntu) o ipconfig (Windows) y compártela.
+
+## Cada compañero
+
+```bash
+python3 cliente.py
+```
+
+Introduce tu nombre y la IP del equipo servidor.
+127.0.0.1 solo sirve si el servidor está en tu propia computadora.
+interfaz_chat.py también abre el mismo cliente.
+
+```text
+------------------------------
+    BIENVENIDO AL CHAT
+------------------------------
+Tu nombre: Ana
+IP del servidor [127.0.0.1]: 192.168.1.20
+------------------------------
+Escribe un mensaje y pulsa Enter.
+Escribe /salir para terminar.
+------------------------------
+Bienvenido, Ana.
+--- Luis entró al chat ---
+[Luis]: Hola a todos
+> Hola Luis
+[Ana]: Hola Luis
+```
+
+Todos los conectados reciben los mensajes, incluido quien los envía.
+Escribe /salir para salir. Detén el servidor con Ctrl+C.
+Si el servidor se desconecta, pulsa Enter para cerrar el cliente.
+
+## Cómo funciona
+
+El cliente mantiene una conexión abierta durante toda la conversación.
+Primero envía su nombre; después, cada mensaje termina en un salto de línea.
+Un hilo del cliente recibe mientras el hilo principal lee el teclado.
+El servidor crea un hilo por cliente y reparte los mensajes a todos.
+Un Lock evita que los envíos concurrentes se mezclen.
+
+Los mensajes entrantes pueden aparecer junto al indicador > mientras escribes.
+La entrada sigue funcionando; es una consola básica.
+No hay historial persistente, cuentas ni cifrado.
+
+## Red
+
+Los equipos deben poder comunicarse en la misma red y el servidor debe aceptar
+TCP entrante al puerto 8080. En VirtualBox, un adaptador puente puede permitir
+que la máquina virtual esté en la misma red que los compañeros.
+
+Connection refused: revisa que el servidor esté iniciado y la IP sea correcta.
+Si se agota el tiempo de conexión, revisa la red y el cortafuegos.
 
 ## Pruebas
-Ejecutar \`python3 prueba_chat.py\`. Prueba manual: iniciar servidor y dos clientes en terminales diferentes, verificar mensajes en ambos sentidos y desconectar un cliente; el servidor debe continuar funcionando.
 
-**Evidencia pendiente:** añadir captura o video real de la demostración entre dos terminales ubicadas en dispositivos distintos de una LAN. Las pruebas locales no sustituyen esta validación.
+```bash
+python3 -m unittest discover -p "prueba*.py" -v
+```
+
+Pruebas con TCP local real; la prueba entre equipos se hace en la red de clase.

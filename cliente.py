@@ -1,90 +1,88 @@
-"""Cliente TCP: un hilo envía mientras el hilo principal recibe."""
+"""Chat básico: el teclado envía y un hilo recibe a los compañeros."""
 import socket
 import threading
 
-from protocolo import (PUERTO, CODIFICACION, COMANDO_SALIR, MAXIMO_ALIAS,
-                       MAXIMO_MENSAJE, validar_alias, validar_mensaje)
 
-
-class ClienteChat:
-    def __init__(self, ip_servidor, puerto, alias):
-        self.ip_servidor = ip_servidor
-        self.puerto = puerto
-        self.alias = alias
+class SocketClient:
+    def __init__(self, host, port=8080):
+        self.host = host
+        self.port = port
         self.conexion = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.activo = threading.Event()
 
-    def conectar(self):
-        try:
-            self.conexion.settimeout(5)
-            self.conexion.connect((self.ip_servidor, self.puerto))
-            self.conexion.settimeout(None)
-            # Primera línea del protocolo = alias.
-            self.conexion.sendall((self.alias + "\n").encode(CODIFICACION))
-            self.activo.set()
-            print(f"\nConectado como {self.alias}")
-            print(f"Escribe {COMANDO_SALIR} para desconectarte.\n")
-            threading.Thread(target=self.enviar_mensajes, daemon=True).start()
-            self.recibir_mensajes()
-        except (OSError, KeyboardInterrupt) as error:
-            print(f"\nError de conexión: {error}")
-        finally:
-            self.desconectar()
+    def connect(self, nombre):
+        self.conexion.settimeout(5)
+        self.conexion.connect((self.host, self.port))
+        self.conexion.settimeout(None)
+        self.conexion.sendall((nombre + "\n").encode("utf-8"))
+        self.activo.set()
 
-    def recibir_mensajes(self):
+    def send_message(self, mensaje):
+        self.conexion.sendall((mensaje + "\n").encode("utf-8"))
+
+    def receive_messages(self):
         try:
-            with self.conexion.makefile("r", encoding=CODIFICACION, errors="replace") as entrada:
-                while self.activo.is_set():
-                    linea = entrada.readline()
-                    if not linea:
-                        if self.activo.is_set():
-                            print("\nEl servidor se desconectó.")
-                        break
-                    print(f"\n{linea.rstrip()}")
-        except OSError as error:
-            if self.activo.is_set():
-                print(f"\nError al recibir: {error}")
+            with self.conexion.makefile("r", encoding="utf-8") as entrada:
+                for linea in entrada:
+                    print("\n" + linea.rstrip(), flush=True)
+        except (OSError, UnicodeError):
+            pass
         finally:
+            if self.activo.is_set():
+                print("\nEl servidor se desconectó. Pulsa Enter para salir.", flush=True)
             self.activo.clear()
 
-    def enviar_mensajes(self):
-        try:
-            while self.activo.is_set():
-                mensaje = input("> ").strip()
-                if not self.activo.is_set() or mensaje.lower() == COMANDO_SALIR:
-                    break
-                if not mensaje:
-                    continue
-                if not validar_mensaje(mensaje):
-                    print(f"El mensaje debe tener entre 1 y {MAXIMO_MENSAJE} caracteres.")
-                    continue
-                self.conexion.sendall((mensaje + "\n").encode(CODIFICACION))
-        except (KeyboardInterrupt, EOFError):
-            print("\nSalida solicitada.")
-        except OSError as error:
-            if self.activo.is_set():
-                print(f"\nError al enviar: {error}")
-        finally:
-            self.activo.clear()
-            try:
-                self.conexion.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-
-    def desconectar(self):
+    def close(self):
         self.activo.clear()
         try:
             self.conexion.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
         self.conexion.close()
-        print("Cliente finalizado.")
+
+
+def main():
+    print("------------------------------")
+    print("    BIENVENIDO AL CHAT")
+    print("------------------------------")
+    client = None
+    receptor = None
+    try:
+        nombre = input("Tu nombre: ").strip() or "Usuario"
+        while len(nombre) > 80:
+            nombre = input("Nombre de hasta 80 caracteres: ").strip() or "Usuario"
+        ip = input("IP del servidor [127.0.0.1]: ").strip() or "127.0.0.1"
+        client = SocketClient(ip, 8080)
+        client.connect(nombre)
+        print("------------------------------")
+        print("Escribe un mensaje y pulsa Enter.")
+        print("Escribe /salir para terminar.")
+        print("------------------------------")
+        # Recibe aunque el usuario esté esperando para escribir.
+        receptor = threading.Thread(target=client.receive_messages, daemon=True)
+        receptor.start()
+        while client.activo.is_set():
+            mensaje = input("> ").strip()
+            if not client.activo.is_set():
+                break
+            if mensaje.lower() == "/salir":
+                client.send_message("/salir")
+                break
+            if len(mensaje) > 4000:
+                print("Máximo 4000 caracteres por mensaje.")
+            elif mensaje:
+                client.send_message(mensaje)
+    except OSError as error:
+        print(f"Error de conexión: {error}. Revisa la IP y que el servidor esté encendido.")
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        if client:
+            client.close()
+        if receptor:
+            receptor.join(2)
+    print("Hasta luego.")
 
 
 if __name__ == "__main__":
-    print("=== CHAT MULTIUSUARIO LAN ===")
-    alias = input("Ingresa tu alias: ").strip()
-    while not validar_alias(alias):
-        alias = input(f"Alias obligatorio (máximo {MAXIMO_ALIAS} caracteres): ").strip()
-    ip = input("IP del servidor [127.0.0.1]: ").strip() or "127.0.0.1"
-    ClienteChat(ip, PUERTO, alias).conectar()
+    main()
