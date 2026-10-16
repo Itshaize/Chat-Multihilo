@@ -1,0 +1,25 @@
+name: Pruebas Python y Tkinter
+
+on: [push, pull_request]
+
+jobs:
+  pruebas:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.14']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Instalar pantalla virtual en Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+      - name: Pruebas en Linux con Tkinter
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -m unittest discover -p 'prueba*.py' -v
+      - name: Pruebas en Windows
+        if: runner.os == 'Windows'
+        run: python -m unittest discover -p 'prueba*.py' -v
