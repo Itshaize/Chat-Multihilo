@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import io
 import logging
+import os
 import platform
 import socket
 import threading
@@ -23,9 +24,10 @@ from servidor_chat import ServidorChat
 
 async def capturar(salida):
     servidor = ServidorChat()
-    app = InterfazChat()
     # La evidencia usa colores aunque el entorno de CI defina NO_COLOR.
-    app.no_color = False
+    with patch.dict(os.environ):
+        os.environ.pop("NO_COLOR", None)
+        app = InterfazChat()
     sesiones, hilos = [], []
     with socket.socket() as oyente:
         oyente.bind(("127.0.0.1", 0))
